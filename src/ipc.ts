@@ -5,6 +5,7 @@ import { CronExpressionParser } from 'cron-parser';
 
 import {
   DATA_DIR,
+  GROUPS_DIR,
   IPC_POLL_INTERVAL,
   MAIN_GROUP_FOLDER,
   TIMEZONE,
@@ -17,6 +18,7 @@ import { RegisteredGroup } from './types.js';
 
 export interface IpcDeps {
   sendMessage: (jid: string, text: string) => Promise<void>;
+  sendImage?: (jid: string, imagePath: string, caption?: string) => Promise<void>;
   registeredGroups: () => Record<string, RegisteredGroup>;
   registerGroup: (jid: string, group: RegisteredGroup) => void;
   syncGroupMetadata: (force: boolean) => Promise<void>;
@@ -29,7 +31,28 @@ export interface IpcDeps {
   ) => void;
 }
 
+/**
+ * Resolve a container-internal path to a host path.
+ * Container paths: /workspace/group/... → groups/<folder>/...
+ */
+function resolveContainerPath(containerPath: string, groupFolder: string): string | null {
+  if (containerPath.startsWith('/workspace/group/')) {
+    return path.join(GROUPS_DIR, groupFolder, containerPath.slice('/workspace/group/'.length));
+  }
+  if (containerPath.startsWith('/workspace/group')) {
+    return path.join(GROUPS_DIR, groupFolder);
+  }
+  // Already a host path or unrecognized
+  return containerPath;
+}
+
 let ipcWatcherRunning = false;
+let _processIpcFiles: (() => Promise<void>) | null = null;
+
+/** Flush any pending IPC messages immediately (e.g. after container exit). */
+export async function flushIpc(): Promise<void> {
+  if (_processIpcFiles) await _processIpcFiles();
+}
 
 export function startIpcWatcher(deps: IpcDeps): void {
   if (ipcWatcherRunning) {
@@ -79,7 +102,25 @@ export function startIpcWatcher(deps: IpcDeps): void {
                   isMain ||
                   (targetGroup && targetGroup.folder === sourceGroup)
                 ) {
-                  await deps.sendMessage(data.chatJid, data.text);
+                  if (data.imagePath && deps.sendImage) {
+                    // Resolve container path to host path
+                    const hostImagePath = resolveContainerPath(data.imagePath, sourceGroup);
+                    if (hostImagePath && fs.existsSync(hostImagePath)) {
+                      await deps.sendImage(data.chatJid, hostImagePath, data.text);
+                      logger.info(
+                        { chatJid: data.chatJid, sourceGroup, imagePath: hostImagePath },
+                        'IPC image sent',
+                      );
+                    } else {
+                      logger.warn(
+                        { chatJid: data.chatJid, imagePath: data.imagePath, resolved: hostImagePath },
+                        'IPC image file not found, sending text only',
+                      );
+                      await deps.sendMessage(data.chatJid, data.text);
+                    }
+                  } else {
+                    await deps.sendMessage(data.chatJid, data.text);
+                  }
                   logger.info(
                     { chatJid: data.chatJid, sourceGroup },
                     'IPC message sent',
@@ -148,6 +189,7 @@ export function startIpcWatcher(deps: IpcDeps): void {
     setTimeout(processIpcFiles, IPC_POLL_INTERVAL);
   };
 
+  _processIpcFiles = processIpcFiles;
   processIpcFiles();
   logger.info('IPC watcher started (per-group namespaces)');
 }

@@ -4,6 +4,7 @@
  */
 import { ChildProcess, exec, spawn } from 'child_process';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 
 import {
@@ -165,6 +166,25 @@ function buildVolumeMounts(
     readonly: false,
   });
 
+  // Mount host git config and SSH keys (read-only) so the agent can commit and push as the user
+  const homeDir = os.homedir();
+  const gitconfigPath = path.join(homeDir, '.gitconfig');
+  if (fs.existsSync(gitconfigPath)) {
+    mounts.push({
+      hostPath: gitconfigPath,
+      containerPath: '/home/node/.gitconfig',
+      readonly: true,
+    });
+  }
+  const sshDir = path.join(homeDir, '.ssh');
+  if (fs.existsSync(sshDir)) {
+    mounts.push({
+      hostPath: sshDir,
+      containerPath: '/home/node/.ssh',
+      readonly: true,
+    });
+  }
+
   // Additional mounts validated against external allowlist (tamper-proof from containers)
   if (group.containerConfig?.additionalMounts) {
     const validatedMounts = validateAdditionalMounts(
@@ -191,6 +211,9 @@ function buildContainerArgs(mounts: VolumeMount[], containerName: string): strin
 
   // Pass host timezone so container's local time matches the user's
   args.push('-e', `TZ=${TIMEZONE}`);
+
+  // Use session-name for cookie persistence across runs (avoids Chromium profile lock issues)
+  args.push('-e', `AGENT_BROWSER_SESSION_NAME=${containerName}`);
 
   // Run as host user so bind-mounted files are accessible.
   // Skip when running as root (uid 0), as the container's node user (uid 1000),

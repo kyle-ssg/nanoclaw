@@ -33,7 +33,7 @@ import {
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
-import { startIpcWatcher } from './ipc.js';
+import { flushIpc, startIpcWatcher } from './ipc.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
@@ -286,6 +286,9 @@ async function runAgent(
       wrappedOnOutput,
     );
 
+    // Flush any IPC messages the agent wrote just before exiting
+    await flushIpc();
+
     if (output.newSessionId) {
       sessions[group.folder] = output.newSessionId;
       setSession(group.folder, output.newSessionId);
@@ -470,6 +473,13 @@ async function main(): Promise<void> {
       const channel = findChannel(channels, jid);
       if (!channel) throw new Error(`No channel for JID: ${jid}`);
       return channel.sendMessage(jid, text);
+    },
+    sendImage: (jid, imagePath, caption) => {
+      const channel = findChannel(channels, jid);
+      if (!channel) throw new Error(`No channel for JID: ${jid}`);
+      if (channel.sendImage) return channel.sendImage(jid, imagePath, caption);
+      // Fallback to text if channel doesn't support images
+      return channel.sendMessage(jid, caption || '[Image]');
     },
     registeredGroups: () => registeredGroups,
     registerGroup,
