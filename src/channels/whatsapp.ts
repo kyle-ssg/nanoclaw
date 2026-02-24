@@ -248,7 +248,8 @@ export class WhatsAppChannel implements Channel {
       await this.sock.sendMessage(jid, {
         image,
         caption: prefixedCaption,
-      });
+        jpegThumbnail: '',  // Skip auto-thumbnail generation (avoids Sharp "unsupported format" errors)
+      } as Parameters<typeof this.sock.sendMessage>[1]);
       logger.info({ jid, imagePath }, 'Image sent');
     } catch (err) {
       logger.warn({ jid, imagePath, err }, 'Failed to send image');
