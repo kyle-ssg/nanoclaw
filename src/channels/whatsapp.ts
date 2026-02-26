@@ -44,6 +44,7 @@ export class WhatsAppChannel implements Channel {
   private groupSyncTimerStarted = false;
 
   private opts: WhatsAppChannelOpts;
+  private reconnectAttempt = 0;
 
   constructor(opts: WhatsAppChannelOpts) {
     this.opts = opts;
@@ -108,21 +109,14 @@ export class WhatsAppChannel implements Channel {
         );
 
         if (shouldReconnect) {
-          logger.info('Reconnecting...');
-          this.connectInternal().catch((err) => {
-            logger.error({ err }, 'Failed to reconnect, retrying in 5s');
-            setTimeout(() => {
-              this.connectInternal().catch((err2) => {
-                logger.error({ err: err2 }, 'Reconnection retry failed');
-              });
-            }, 5000);
-          });
+          this.reconnectWithBackoff();
         } else {
           logger.info('Logged out. Run /setup to re-authenticate.');
           process.exit(0);
         }
       } else if (connection === 'open') {
         this.connected = true;
+        this.reconnectAttempt = 0;
         logger.info('Connected to WhatsApp');
 
         // Announce availability so WhatsApp relays subsequent presence updates (typing indicators)
@@ -215,7 +209,7 @@ export class WhatsAppChannel implements Channel {
           // (even in DMs/self-chat) so we check for that.
           const isBotMessage = ASSISTANT_HAS_OWN_NUMBER
             ? fromMe
-            : content.startsWith(`${ASSISTANT_NAME}:`);
+            : content.startsWith('🤖');
 
           this.opts.onMessage(chatJid, {
             id: msg.key.id || '',
@@ -232,6 +226,18 @@ export class WhatsAppChannel implements Channel {
     });
   }
 
+  private reconnectWithBackoff(): void {
+    this.reconnectAttempt++;
+    const delay = Math.min(1000 * 2 ** (this.reconnectAttempt - 1), 60_000); // 1s, 2s, 4s, ... 60s max
+    logger.info({ attempt: this.reconnectAttempt, delayMs: delay }, 'Reconnecting...');
+    setTimeout(() => {
+      this.connectInternal().catch((err) => {
+        logger.error({ err, attempt: this.reconnectAttempt }, 'Reconnect failed');
+        this.reconnectWithBackoff();
+      });
+    }, delay);
+  }
+
   async sendMessage(jid: string, text: string): Promise<void> {
     // Prefix bot messages with assistant name so users know who's speaking.
     // On a shared number, prefix is also needed in DMs (including self-chat)
@@ -239,7 +245,7 @@ export class WhatsAppChannel implements Channel {
     // Skip only when the assistant has its own dedicated phone number.
     const prefixed = ASSISTANT_HAS_OWN_NUMBER
       ? text
-      : `${ASSISTANT_NAME}: ${text}`;
+      : `🤖 ${text}`;
 
     if (!this.connected) {
       this.outgoingQueue.push({ jid, text: prefixed });
@@ -259,6 +265,29 @@ export class WhatsAppChannel implements Channel {
         { jid, err, queueSize: this.outgoingQueue.length },
         'Failed to send, message queued',
       );
+    }
+  }
+
+  async sendImage(jid: string, imagePath: string, caption?: string): Promise<void> {
+    const fs = await import('fs');
+    const image = fs.readFileSync(imagePath);
+    const prefixedCaption = caption
+      ? (ASSISTANT_HAS_OWN_NUMBER ? caption : `🤖 ${caption}`)
+      : undefined;
+
+    if (!this.connected) {
+      logger.warn({ jid }, 'WA disconnected, cannot send image');
+      return;
+    }
+    try {
+      await this.sock.sendMessage(jid, {
+        image,
+        caption: prefixedCaption,
+        jpegThumbnail: '',  // Skip auto-thumbnail generation (avoids Sharp "unsupported format" errors)
+      } as Parameters<typeof this.sock.sendMessage>[1]);
+      logger.info({ jid, imagePath }, 'Image sent');
+    } catch (err) {
+      logger.warn({ jid, imagePath, err }, 'Failed to send image');
     }
   }
 
@@ -363,13 +392,15 @@ export class WhatsAppChannel implements Channel {
         'Flushing outgoing message queue',
       );
       while (this.outgoingQueue.length > 0) {
-        const item = this.outgoingQueue.shift()!;
-        // Send directly — queued items are already prefixed by sendMessage
-        await this.sock.sendMessage(item.jid, { text: item.text });
-        logger.info(
-          { jid: item.jid, length: item.text.length },
-          'Queued message sent',
-        );
+        const item = this.outgoingQueue[0];
+        try {
+          await this.sock.sendMessage(item.jid, { text: item.text });
+          this.outgoingQueue.shift(); // Only remove after successful send
+          logger.info({ jid: item.jid, length: item.text.length }, 'Queued message sent');
+        } catch (err) {
+          logger.warn({ jid: item.jid, err, remaining: this.outgoingQueue.length }, 'Queue flush failed, will retry on next reconnect');
+          break; // Stop flushing — messages stay in queue for next reconnect
+        }
       }
     } finally {
       this.flushing = false;

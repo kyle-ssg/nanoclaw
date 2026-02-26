@@ -36,7 +36,7 @@ import {
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
-import { startIpcWatcher } from './ipc.js';
+import { flushIpc, startIpcWatcher } from './ipc.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
@@ -177,6 +177,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   let idleTimer: ReturnType<typeof setTimeout> | null = null;
 
   const resetIdleTimer = () => {
+    if (!IDLE_TIMEOUT) return; // 0 = no idle timeout
     if (idleTimer) clearTimeout(idleTimer);
     idleTimer = setTimeout(() => {
       logger.debug(
@@ -304,6 +305,9 @@ async function runAgent(
         queue.registerProcess(chatJid, proc, containerName, group.folder),
       wrappedOnOutput,
     );
+
+    // Flush any IPC messages the agent wrote just before exiting
+    await flushIpc();
 
     if (output.newSessionId) {
       sessions[group.folder] = output.newSessionId;
@@ -501,6 +505,18 @@ async function main(): Promise<void> {
       const channel = findChannel(channels, jid);
       if (!channel) throw new Error(`No channel for JID: ${jid}`);
       return channel.sendMessage(jid, text);
+    },
+    sendImage: (jid, imagePath, caption) => {
+      const channel = findChannel(channels, jid);
+      if (!channel) throw new Error(`No channel for JID: ${jid}`);
+      if (channel.sendImage) return channel.sendImage(jid, imagePath, caption);
+      // Fallback to text if channel doesn't support images
+      return channel.sendMessage(jid, caption || '[Image]');
+    },
+    setTyping: (jid, isTyping) => {
+      const channel = findChannel(channels, jid);
+      if (!channel) return Promise.resolve();
+      return channel.setTyping?.(jid, isTyping) ?? Promise.resolve();
     },
     registeredGroups: () => registeredGroups,
     registerGroup,

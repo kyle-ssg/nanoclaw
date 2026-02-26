@@ -4,6 +4,7 @@
  */
 import { ChildProcess, exec, spawn } from 'child_process';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 
 import {
@@ -186,6 +187,25 @@ function buildVolumeMounts(
     readonly: false,
   });
 
+  // Mount host git config and SSH keys (read-only) so the agent can commit and push as the user
+  const homeDir = os.homedir();
+  const gitconfigPath = path.join(homeDir, '.gitconfig');
+  if (fs.existsSync(gitconfigPath)) {
+    mounts.push({
+      hostPath: gitconfigPath,
+      containerPath: '/home/node/.gitconfig',
+      readonly: true,
+    });
+  }
+  const sshDir = path.join(homeDir, '.ssh');
+  if (fs.existsSync(sshDir)) {
+    mounts.push({
+      hostPath: sshDir,
+      containerPath: '/home/node/.ssh',
+      readonly: true,
+    });
+  }
+
   // Additional mounts validated against external allowlist (tamper-proof from containers)
   if (group.containerConfig?.additionalMounts) {
     const validatedMounts = validateAdditionalMounts(
@@ -207,14 +227,14 @@ function readSecrets(): Record<string, string> {
   return readEnvFile(['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY']);
 }
 
-function buildContainerArgs(
-  mounts: VolumeMount[],
-  containerName: string,
-): string[] {
+function buildContainerArgs(mounts: VolumeMount[], containerName: string, groupFolder: string): string[] {
   const args: string[] = ['run', '-i', '--rm', '--name', containerName];
 
   // Pass host timezone so container's local time matches the user's
   args.push('-e', `TZ=${TIMEZONE}`);
+
+  // Use session-name for cookie persistence across runs (avoids Chromium profile lock issues)
+  args.push('-e', `AGENT_BROWSER_SESSION_NAME=${containerName}`);
 
   // Run as host user so bind-mounted files are accessible.
   // Skip when running as root (uid 0), as the container's node user (uid 1000),
@@ -224,6 +244,16 @@ function buildContainerArgs(
   if (hostUid != null && hostUid !== 0 && hostUid !== 1000) {
     args.push('--user', `${hostUid}:${hostGid}`);
     args.push('-e', 'HOME=/home/node');
+  }
+
+  // Ensure the host UID has a passwd entry inside the container so SSH
+  // can resolve the home directory for key lookup. Without this, git push
+  // fails with "No user exists for uid NNN".
+  if (hostUid != null && hostUid !== 0 && hostUid !== 1000) {
+    const passwdFile = path.join(DATA_DIR, 'sessions', groupFolder, 'passwd');
+    const passwdEntry = `node:x:${hostUid}:${hostGid ?? 0}::/home/node:/bin/sh\n`;
+    fs.writeFileSync(passwdFile, passwdEntry);
+    args.push(...readonlyMountArgs(passwdFile, '/etc/passwd'));
   }
 
   for (const mount of mounts) {
@@ -253,7 +283,7 @@ export async function runContainerAgent(
   const mounts = buildVolumeMounts(group, input.isMain);
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
   const containerName = `nanoclaw-${safeName}-${Date.now()}`;
-  const containerArgs = buildContainerArgs(mounts, containerName);
+  const containerArgs = buildContainerArgs(mounts, containerName, group.folder);
 
   logger.debug(
     {
