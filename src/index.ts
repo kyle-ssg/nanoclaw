@@ -171,6 +171,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   let idleTimer: ReturnType<typeof setTimeout> | null = null;
 
   const resetIdleTimer = () => {
+    if (!IDLE_TIMEOUT) return; // 0 = no idle timeout
     if (idleTimer) clearTimeout(idleTimer);
     idleTimer = setTimeout(() => {
       logger.debug({ group: group.name }, 'Idle timeout, closing container stdin');
@@ -480,6 +481,11 @@ async function main(): Promise<void> {
       if (channel.sendImage) return channel.sendImage(jid, imagePath, caption);
       // Fallback to text if channel doesn't support images
       return channel.sendMessage(jid, caption || '[Image]');
+    },
+    setTyping: (jid, isTyping) => {
+      const channel = findChannel(channels, jid);
+      if (!channel) return Promise.resolve();
+      return channel.setTyping?.(jid, isTyping) ?? Promise.resolve();
     },
     registeredGroups: () => registeredGroups,
     registerGroup,

@@ -206,7 +206,7 @@ function readSecrets(): Record<string, string> {
   return readEnvFile(['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY']);
 }
 
-function buildContainerArgs(mounts: VolumeMount[], containerName: string): string[] {
+function buildContainerArgs(mounts: VolumeMount[], containerName: string, groupFolder: string): string[] {
   const args: string[] = ['run', '-i', '--rm', '--name', containerName];
 
   // Pass host timezone so container's local time matches the user's
@@ -223,6 +223,16 @@ function buildContainerArgs(mounts: VolumeMount[], containerName: string): strin
   if (hostUid != null && hostUid !== 0 && hostUid !== 1000) {
     args.push('--user', `${hostUid}:${hostGid}`);
     args.push('-e', 'HOME=/home/node');
+  }
+
+  // Ensure the host UID has a passwd entry inside the container so SSH
+  // can resolve the home directory for key lookup. Without this, git push
+  // fails with "No user exists for uid NNN".
+  if (hostUid != null && hostUid !== 0 && hostUid !== 1000) {
+    const passwdFile = path.join(DATA_DIR, 'sessions', groupFolder, 'passwd');
+    const passwdEntry = `node:x:${hostUid}:${hostGid ?? 0}::/home/node:/bin/sh\n`;
+    fs.writeFileSync(passwdFile, passwdEntry);
+    args.push(...readonlyMountArgs(passwdFile, '/etc/passwd'));
   }
 
   for (const mount of mounts) {
@@ -252,7 +262,7 @@ export async function runContainerAgent(
   const mounts = buildVolumeMounts(group, input.isMain);
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
   const containerName = `nanoclaw-${safeName}-${Date.now()}`;
-  const containerArgs = buildContainerArgs(mounts, containerName);
+  const containerArgs = buildContainerArgs(mounts, containerName, group.folder);
 
   logger.debug(
     {

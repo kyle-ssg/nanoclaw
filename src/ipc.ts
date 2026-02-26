@@ -19,6 +19,7 @@ import { RegisteredGroup } from './types.js';
 export interface IpcDeps {
   sendMessage: (jid: string, text: string) => Promise<void>;
   sendImage?: (jid: string, imagePath: string, caption?: string) => Promise<void>;
+  setTyping?: (jid: string, isTyping: boolean) => Promise<void>;
   registeredGroups: () => Record<string, RegisteredGroup>;
   registerGroup: (jid: string, group: RegisteredGroup) => void;
   syncGroupMetadata: (force: boolean) => Promise<void>;
@@ -125,6 +126,13 @@ export function startIpcWatcher(deps: IpcDeps): void {
                     { chatJid: data.chatJid, sourceGroup },
                     'IPC message sent',
                   );
+                  // Re-set typing indicator after a short delay — WhatsApp
+                  // clears composing state when a message is sent and ignores
+                  // an immediate re-set.
+                  const typingJid = data.chatJid;
+                  setTimeout(() => {
+                    deps.setTyping?.(typingJid, true)?.catch(() => {});
+                  }, 1500);
                 } else {
                   logger.warn(
                     { chatJid: data.chatJid, sourceGroup },
